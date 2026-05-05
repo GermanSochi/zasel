@@ -203,6 +203,35 @@ body {
 .btn-reupload { font-size: 11px; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
 .btn-reupload:hover { background: #f0f0f0; }
 
+/* ── OCR debug panel ── */
+.ocr-debug { margin-top: 8px; }
+.ocr-debug-toggle {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+.ocr-debug-toggle:hover { background: #f0f0f0; opacity: 1; }
+.ocr-debug-text {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: #f8f8f6;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  color: #555;
+  font-family: 'Courier New', monospace;
+}
+
 /* ── Loading spinner ── */
 .spinner {
   display: inline-block;

@@ -31,6 +31,8 @@ function addPerson() {
     ocrStatus: 'idle',   // idle | loading | done | error
     ocrError: '',
     ocrProgress: 0,
+    rawOcr: '',
+    showDebug: false,
   })
   render()
   setTimeout(() => {
@@ -71,6 +73,7 @@ async function handlePassportFile(id, file) {
       ocrStatus:  found ? 'done' : 'warn',
       ocrError:   found ? '' : 'Не распознано — проверь качество фото или заполни вручную',
       ocrProgress: 100,
+      rawOcr:     result._rawOcr   || '',
     })
   } catch (err) {
     setPerson(id, { ocrStatus: 'error', ocrError: err.message, ocrProgress: 0 })
@@ -224,6 +227,13 @@ function buildPassportZone(p) {
       error: `<span class="status-err">✕ ${esc(p.ocrError)}</span>`,
       idle: `<span class="status-muted">Загружено</span>`,
     }
+    const debugBlock = p.rawOcr ? `
+      <div class="ocr-debug">
+        <button class="ocr-debug-toggle" data-action="toggle-debug" data-id="${p.id}">
+          ${p.showDebug ? '▲ Скрыть' : '▼ OCR текст'}
+        </button>
+        ${p.showDebug ? `<pre class="ocr-debug-text">${esc(p.rawOcr)}</pre>` : ''}
+      </div>` : ''
     return `
       <div class="passport-thumb">
         <img src="${p.imageUrl}" alt="паспорт" />
@@ -233,6 +243,7 @@ function buildPassportZone(p) {
         </div>
         <button class="btn-reupload" data-action="reupload" data-id="${p.id}">Заменить</button>
       </div>
+      ${debugBlock}
       <input type="file" accept="image/*" data-action="file" data-id="${p.id}" id="file-${p.id}" style="display:none" />
     `
   }
@@ -330,6 +341,10 @@ function attachListeners() {
     if (isNaN(id)) return
     if (btn.dataset.action === 'remove') removePerson(id)
     else if (btn.dataset.action === 'reupload') document.getElementById(`file-${id}`)?.click()
+    else if (btn.dataset.action === 'toggle-debug') {
+      const p = state.persons.find(x => x.id === id)
+      if (p) setPerson(id, { showDebug: !p.showDebug })
+    }
   })
 
   document.querySelectorAll('.passport-upload').forEach(zone => {
