@@ -387,6 +387,55 @@ body {
   .toast { opacity: 0; transform: translateY(12px); }
 }
 
+/* ── API Key Banner ── */
+.api-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.api-banner-icon { font-size: 20px; flex-shrink: 0; }
+.api-banner-body { flex: 1; min-width: 0; }
+.api-banner-body strong { display: block; font-size: 13px; font-weight: 600; color: #92400e; margin-bottom: 2px; }
+.api-banner-body span { font-size: 12px; color: #b45309; }
+.api-banner-body a { color: #d97706; font-weight: 500; }
+
+.btn-sm { padding: 7px 12px; font-size: 12px; }
+.btn-icon-alert { border-color: #fcd34d; background: #fffbeb; color: #d97706; }
+.btn-icon-sm { width: 24px; height: 24px; padding: 0; font-size: 12px; }
+
+/* ── Settings panel ── */
+.settings-panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+.settings-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 13px; font-weight: 600;
+}
+
+/* ── OCR loading ── */
+.ocr-loading {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: #2563eb;
+  padding: 12px;
+  background: #f0f4ff;
+  border-radius: var(--radius-sm);
+  margin-bottom: 14px;
+  border: 1px solid #c7d7ff;
+}
+
+/* ── Status ── */
+.status-ok { color: var(--success); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.status-err { color: var(--danger); font-size: 12px; }
+.status-muted { color: var(--text-muted); font-size: 12px; }
+
 /* ── OCR progress ── */
 .ocr-progress-wrap {
   margin-bottom: 14px;

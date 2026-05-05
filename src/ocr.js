@@ -1,133 +1,127 @@
-import { createWorker } from 'tesseract.js'
-
-let _worker = null
-let _workerReady = false
-
-async function getWorker(onProgress) {
-  if (_worker && _workerReady) return _worker
-
-  _worker = await createWorker('rus', 1, {
-    logger: (m) => {
-      if (onProgress && m.status === 'recognizing text') {
-        onProgress(Math.round(m.progress * 100))
-      }
-    },
-  })
-  _workerReady = true
-  return _worker
-}
-
 /**
- * Распознаёт данные паспорта через Tesseract.js (браузерный OCR, без API ключа).
- * Возвращает { surname, name, patronymic, dob }
- * onProgress(0..100) — колбэк прогресса
+ * OCR паспортов — подход из ai-documents-parser-main:
+ * 1. Canvas resize/compress до 2000px и <5MB (как PIL.thumbnail в оригинале)
+ * 2. Claude vision API с JSON-промптом
+ * 3. Извлечение: surname, name, patronymic, dob
  */
-export async function extractPassportData(imageDataUrl, onProgress) {
-  onProgress?.(5)
-  const worker = await getWorker(onProgress)
-  const { data: { text } } = await worker.recognize(imageDataUrl)
-  onProgress?.(100)
-  return parsePassportText(text)
+
+// ── Image preprocessing (браузерный аналог PIL resize_and_compress) ───────────
+
+export function preprocessImage(file, maxPx = 2000, maxBytes = 5 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+
+    img.onerror = reject
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+
+      const canvas = document.createElement('canvas')
+      let { naturalWidth: w, naturalHeight: h } = img
+
+      // Сжимаем до maxPx с сохранением пропорций (как image.thumbnail в PIL)
+      if (w > maxPx || h > maxPx) {
+        const ratio = Math.min(maxPx / w, maxPx / h)
+        w = Math.round(w * ratio)
+        h = Math.round(h * ratio)
+      }
+
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(img, 0, 0, w, h)
+
+      // Итеративное сжатие JPEG (как в оригинале: quality -= 5 пока не < maxBytes)
+      let quality = 0.85
+      let dataUrl
+      do {
+        dataUrl = canvas.toDataURL('image/jpeg', quality)
+        // base64 ~= 4/3 от бинарного
+        if ((dataUrl.length * 3) / 4 <= maxBytes) break
+        quality = Math.round((quality - 0.05) * 100) / 100
+      } while (quality > 0.1)
+
+      resolve(dataUrl)
+    }
+
+    img.src = url
+  })
 }
 
-// ── Парсинг текста паспорта ────────────────────────────────────────────────
+// ── Claude vision API (ai-documents-parser prompt + структура) ────────────────
 
-function parsePassportText(raw) {
-  const lines = raw
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean)
+export async function extractPassportData(imageDataUrl, apiKey) {
+  const [header, base64Data] = imageDataUrl.split(',')
+  const mediaType = header.match(/:(.*?);/)?.[1] || 'image/jpeg'
 
-  let surname = ''
-  let name = ''
-  let patronymic = ''
-  let dob = ''
+  // Промпт из ai-documents-parser-main/documents_parser.py — адаптирован под рус. паспорт
+  const prompt = `Это фото российского паспорта. Извлеки данные и верни ТОЛЬКО JSON без пояснений:
+{
+  "surname": "Фамилия (только кириллица)",
+  "name": "Имя (только кириллица)",
+  "patronymic": "Отчество (только кириллица)",
+  "dob": "Дата рождения ДД.ММ.ГГГГ",
+  "passportNumber": "Серия и номер XX XX XXXXXX или null",
+  "gender": "МУЖ или ЖЕН или null"
+}
+Если поле не читается — null. Только JSON, никакого другого текста.`
 
-  for (let i = 0; i < lines.length; i++) {
-    const cur = lines[i]
-    const curU = cur.toUpperCase()
-    const next = lines[i + 1] || ''
-    const next2 = lines[i + 2] || ''
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType, data: base64Data },
+            },
+            { type: 'text', text: prompt },
+          ],
+        },
+      ],
+    }),
+  })
 
-    // ── ФАМИЛИЯ ──
-    if (/ФАМИЛИ/.test(curU) || /SURNAME/.test(curU)) {
-      const v = firstCyrillicWord(next)
-      if (v.length >= 2) surname = v
-    }
-
-    // ── ИМЯ / ИМЯ ОТЧЕСТВО ──
-    if (/^ИМЯ/.test(curU) || /^NAME/.test(curU)) {
-      const parts = cyrillicWords(next)
-      if (parts.length >= 2) {
-        ;[name, patronymic] = parts
-      } else if (parts.length === 1) {
-        name = parts[0]
-        const p2 = firstCyrillicWord(next2)
-        if (p2.length >= 3 && !isLabel(next2)) patronymic = p2
-      }
-    }
-
-    // ── ОТЧЕСТВО (отдельный лейбл) ──
-    if (/^ОТЧЕСТВ/.test(curU) || /^PATRONYMIC/.test(curU)) {
-      if (!patronymic) {
-        const v = firstCyrillicWord(next)
-        if (v.length >= 2) patronymic = v
-      }
-    }
-
-    // ── ДАТА РОЖДЕНИЯ ──
-    if (/ДАТА.{0,5}РОЖ/.test(curU) || /DATE.{0,5}BIRTH/.test(curU)) {
-      dob = findDate(next) || findDate(cur) || dob
-    }
-
-    // Подхватываем дату в строке с "РОЖДЕН"
-    if (/РОЖДЕН/.test(curU) && !dob) {
-      dob = findDate(cur) || findDate(next) || dob
-    }
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err?.error?.message || `HTTP ${response.status}`)
   }
 
-  // Fallback: если дату не нашли по лейблу — ищем первую дату в тексте
-  if (!dob) {
-    for (const l of lines) {
-      const d = findDate(l)
-      if (d) { dob = d; break }
-    }
+  const data = await response.json()
+  const raw = data.content?.[0]?.text?.trim() || ''
+
+  // Как в оригинале: пробуем целиком, потом ищем JSON-блок
+  try {
+    return parseResult(JSON.parse(raw))
+  } catch {
+    const m = raw.match(/\{[\s\S]*?\}/)
+    if (!m) throw new Error('Не удалось разобрать ответ API')
+    return parseResult(JSON.parse(m[0]))
   }
+}
+
+function parseResult(obj) {
+  const cap = s => (s && s !== 'null' && s !== 'None')
+    ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()
+    : ''
 
   return {
-    surname: toTitle(surname),
-    name: toTitle(name),
-    patronymic: toTitle(patronymic),
-    dob,
+    surname: cap(obj.surname),
+    name: cap(obj.name),
+    patronymic: cap(obj.patronymic),
+    dob: obj.dob && obj.dob !== 'null' ? obj.dob : '',
+    passportNumber: obj.passportNumber && obj.passportNumber !== 'null' ? obj.passportNumber : '',
   }
-}
-
-function firstCyrillicWord(str) {
-  const m = str.match(/[А-ЯЁа-яё][А-ЯЁа-яё\-]+/)
-  return m ? m[0].toUpperCase() : ''
-}
-
-function cyrillicWords(str) {
-  return (str.match(/[А-ЯЁа-яё\-]+/g) || [])
-    .map(w => w.toUpperCase())
-    .filter(w => w.length >= 2)
-}
-
-function findDate(str) {
-  // DD.MM.YYYY or DD MM YYYY or DD-MM-YYYY, also OCR mixes О/0
-  const clean = str.replace(/[ОоOо]/g, '0')
-  const m = clean.match(/\d{1,2}[\.\s\-]\d{1,2}[\.\s\-]\d{4}/)
-  if (!m) return null
-  return m[0].replace(/[\s\-]/g, '.')
-}
-
-function isLabel(str) {
-  return /ДАТА|ПОЛА?|МЕСТО|ГРАЖД|ОРГАН|ВЫДАН|СЕРИЯ|НОМЕР|АДРЕС/.test(str.toUpperCase())
-}
-
-function toTitle(s) {
-  if (!s) return ''
-  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()
 }
 
 export function fileToDataUrl(file) {
