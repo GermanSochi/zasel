@@ -432,9 +432,10 @@ body {
 }
 
 /* ── Status ── */
-.status-ok { color: var(--success); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
-.status-err { color: var(--danger); font-size: 12px; }
-.status-muted { color: var(--text-muted); font-size: 12px; }
+.status-ok   { color: var(--success); display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+.status-err  { color: var(--danger); font-size: 12px; }
+.status-warn { color: #d97706; font-size: 12px; }
+.status-muted{ color: var(--text-muted); font-size: 12px; }
 
 /* ── OCR progress ── */
 .ocr-progress-wrap {

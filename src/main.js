@@ -7,7 +7,6 @@ import { generateDocument } from './docx-gen.js'
 let nextId = 1
 
 const state = {
-  apiKey: localStorage.getItem('apiKey') || '',
   arrivalDate: todayISO(),
   persons: [],
 }
@@ -29,8 +28,9 @@ function addPerson() {
     surname: '', name: '', patronymic: '', dob: '',
     specialty: 'Официант', customSpecialty: '',
     imageUrl: null, imageName: null,
-    ocrStatus: 'idle',  // idle | loading | done | error
+    ocrStatus: 'idle',   // idle | loading | done | error
     ocrError: '',
+    ocrProgress: 0,
   })
   render()
   setTimeout(() => {
@@ -44,40 +44,36 @@ function removePerson(id) {
   render()
 }
 
-// ── OCR ───────────────────────────────────────────────────────────────────────
+// ── OCR (офлайн, без API ключа) ───────────────────────────────────────────────
 
 async function handlePassportFile(id, file) {
   if (!file) return
 
-  // Показываем превью сразу
   const rawUrl = URL.createObjectURL(file)
-  setPerson(id, { imageUrl: rawUrl, imageName: file.name, ocrStatus: 'loading', ocrError: '' })
-
-  if (!state.apiKey) {
-    setPerson(id, {
-      ocrStatus: 'error',
-      ocrError: 'Введи API ключ Anthropic (кнопка ⚙️ вверху)',
-    })
-    return
-  }
+  setPerson(id, { imageUrl: rawUrl, imageName: file.name, ocrStatus: 'loading', ocrError: '', ocrProgress: 5 })
 
   try {
-    // Шаг 1: resize/compress — как PIL.thumbnail + quality loop из ai-documents-parser
-    const compressed = await preprocessImage(file)
+    // Шаг 1: resize + grayscale + contrast (Canvas API)
+    setPerson(id, { ocrProgress: 10 })
+    const processed = await preprocessImage(file)
 
-    // Шаг 2: Claude vision API
-    const result = await extractPassportData(compressed, state.apiKey)
+    // Шаг 2: Tesseract rus+eng → MRZ + визуальный парсинг
+    const result = await extractPassportData(processed, null, (pct) => {
+      setPerson(id, { ocrProgress: 10 + Math.round(pct * 0.9) })
+    })
 
+    const found = !!(result.surname || result.name)
     setPerson(id, {
-      surname: result.surname || '',
-      name: result.name || '',
+      surname:    result.surname    || '',
+      name:       result.name       || '',
       patronymic: result.patronymic || '',
-      dob: result.dob || '',
-      ocrStatus: result.surname || result.name ? 'done' : 'error',
-      ocrError: result.surname || result.name ? '' : 'Данные не найдены — заполни вручную',
+      dob:        result.dob        || '',
+      ocrStatus:  found ? 'done' : 'warn',
+      ocrError:   found ? '' : 'Не распознано — проверь качество фото или заполни вручную',
+      ocrProgress: 100,
     })
   } catch (err) {
-    setPerson(id, { ocrStatus: 'error', ocrError: err.message })
+    setPerson(id, { ocrStatus: 'error', ocrError: err.message, ocrProgress: 0 })
   }
 }
 
@@ -85,12 +81,10 @@ async function handlePassportFile(id, file) {
 
 async function handleDownload() {
   if (!state.persons.length) { showToast('Добавь хотя бы одного сотрудника', 'error'); return }
-
   const filled = state.persons.map(p => ({
     ...p,
     specialty: p.specialty === '__custom__' ? p.customSpecialty : p.specialty,
   }))
-
   try {
     await generateDocument(filled, state.arrivalDate)
     showToast('Документ скачан', 'success')
@@ -119,22 +113,12 @@ function render() {
 }
 
 function buildApp() {
-  const hasKey = !!state.apiKey
   return `
     <div class="app-header">
       <div>
         <div class="app-title">Список на заселение</div>
         <div class="app-subtitle">ИП Калгунов → ООО ЛесРесорт</div>
       </div>
-      <button class="btn-icon ${!hasKey ? 'btn-icon-alert' : ''}" id="btn-settings" title="API ключ">
-        ${hasKey ? iconGear() : iconKey()}
-      </button>
-    </div>
-
-    ${buildApiKeyBanner()}
-
-    <div id="settings-panel" style="display:none">
-      ${buildSettings()}
     </div>
 
     <div class="date-row">
@@ -143,7 +127,9 @@ function buildApp() {
     </div>
 
     <div class="persons-list" id="persons-list">
-      ${state.persons.length ? state.persons.map((p, i) => buildCard(p, i)).join('') : buildEmptyState()}
+      ${state.persons.length
+        ? state.persons.map((p, i) => buildCard(p, i)).join('')
+        : buildEmptyState()}
     </div>
 
     <div class="bottom-bar">
@@ -152,56 +138,16 @@ function buildApp() {
     </div>
 
     ${state.persons.length ? buildPreview() : ''}
-
     <div class="toast-container"></div>
   `
 }
 
-function buildApiKeyBanner() {
-  if (state.apiKey) return ''
-  return `
-    <div class="api-banner">
-      <div class="api-banner-icon">🔑</div>
-      <div class="api-banner-body">
-        <strong>Для распознавания паспортов нужен API ключ Anthropic</strong>
-        <span>Бесплатный ключ: <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> → $5 кредит</span>
-      </div>
-      <button class="btn btn-primary btn-sm" id="btn-open-settings">Ввести ключ</button>
-    </div>
-  `
-}
-
-function buildSettings() {
-  const hasKey = !!state.apiKey
-  return `
-    <div class="settings-panel">
-      <div class="settings-head">
-        <strong>Anthropic API ключ</strong>
-        <button class="btn-icon btn-icon-sm" id="btn-close-settings">✕</button>
-      </div>
-      <div class="settings-row">
-        <input type="password" id="api-key-input" placeholder="sk-ant-api03-..." value="${state.apiKey}" autocomplete="off" spellcheck="false" />
-        <button class="btn btn-primary btn-sm" id="btn-save-key">Сохранить</button>
-      </div>
-      <div class="key-status ${hasKey ? 'ok' : 'missing'}">
-        ${hasKey
-          ? `${iconCheck()} Ключ активен — паспорта распознаются автоматически`
-          : `Получи бесплатный ключ на <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>`
-        }
-      </div>
-    </div>
-  `
-}
-
 function buildEmptyState() {
-  const hint = state.apiKey
-    ? 'Фото паспорта → ФИО распознаётся автоматически'
-    : 'Сначала введи API ключ (кнопка 🔑 вверху), затем загружай паспорта'
   return `
     <div class="empty-state">
       <div class="empty-icon">🛂</div>
       <div class="empty-text">Нет сотрудников</div>
-      <div class="empty-sub">${hint}</div>
+      <div class="empty-sub">Нажми «Добавить» и загрузи фото паспорта — ФИО распознаётся офлайн</div>
     </div>
   `
 }
@@ -242,7 +188,12 @@ function buildCard(p, index) {
               return `<option value="${val}" ${p.specialty === val ? 'selected' : ''}>${s}</option>`
             }).join('')}
           </select>
-          ${isCustom ? `<input class="specialty-custom" type="text" data-field="customSpecialty" data-id="${p.id}" value="${esc(p.customSpecialty)}" placeholder="Введи специальность..." style="margin-top:6px" />` : ''}
+          ${isCustom ? `
+            <input class="specialty-custom" type="text"
+              data-field="customSpecialty" data-id="${p.id}"
+              value="${esc(p.customSpecialty)}"
+              placeholder="Введи специальность..." style="margin-top:6px" />
+          ` : ''}
         </div>
       </div>
     </div>
@@ -251,28 +202,34 @@ function buildCard(p, index) {
 
 function buildPassportZone(p) {
   if (p.ocrStatus === 'loading') {
+    const pct = p.ocrProgress || 0
     return `
-      <div class="ocr-loading">
-        <span class="spinner"></span>
-        <span>Распознаю паспорт…</span>
+      <div class="ocr-progress-wrap">
+        <div class="ocr-progress-label">
+          <span class="spinner"></span>
+          Распознаю паспорт… ${pct}%
+        </div>
+        <div class="ocr-progress-bar">
+          <div class="ocr-progress-fill" style="width:${pct}%"></div>
+        </div>
       </div>
       <input type="file" accept="image/*" data-action="file" data-id="${p.id}" id="file-${p.id}" style="display:none" />
     `
   }
 
   if (p.imageUrl) {
-    const statusHtml = {
-      done:  `<span class="status-ok">${iconCheck()} Распознано</span>`,
-      error: `<span class="status-err">⚠ ${esc(p.ocrError)}</span>`,
-      idle:  `<span class="status-muted">Загружено</span>`,
-    }[p.ocrStatus] || ''
-
+    const statusMap = {
+      done: `<span class="status-ok">${iconCheck()} Данные распознаны</span>`,
+      warn: `<span class="status-warn">⚠ ${esc(p.ocrError)}</span>`,
+      error: `<span class="status-err">✕ ${esc(p.ocrError)}</span>`,
+      idle: `<span class="status-muted">Загружено</span>`,
+    }
     return `
       <div class="passport-thumb">
         <img src="${p.imageUrl}" alt="паспорт" />
         <div class="passport-thumb-info">
           <div class="passport-thumb-name">${esc(p.imageName || '')}</div>
-          <div class="passport-thumb-status">${statusHtml}</div>
+          <div class="passport-thumb-status">${statusMap[p.ocrStatus] || ''}</div>
         </div>
         <button class="btn-reupload" data-action="reupload" data-id="${p.id}">Заменить</button>
       </div>
@@ -285,9 +242,10 @@ function buildPassportZone(p) {
       <div class="passport-upload-icon">📷</div>
       <div class="passport-upload-text">
         <strong>Загрузить фото паспорта</strong>
-        ФИО распознается автоматически
+        ФИО распознаётся офлайн — без интернета и API ключей
       </div>
-      <input type="file" accept="image/*" capture="environment" data-action="file" data-id="${p.id}" id="file-${p.id}" />
+      <input type="file" accept="image/*" capture="environment"
+        data-action="file" data-id="${p.id}" id="file-${p.id}" />
     </label>
   `
 }
@@ -298,7 +256,12 @@ function buildPreview() {
       <h2>Предпросмотр</h2>
       <div class="preview-table-wrap">
         <table class="preview-table">
-          <thead><tr><th>№</th><th>Фамилия</th><th>Имя</th><th>Отчество</th><th>Дата прибытия</th><th>Специальность</th></tr></thead>
+          <thead>
+            <tr>
+              <th>№</th><th>Фамилия</th><th>Имя</th>
+              <th>Отчество</th><th>Дата прибытия</th><th>Специальность</th>
+            </tr>
+          </thead>
           <tbody>
             ${state.persons.map((p, i) => {
               const spec = p.specialty === '__custom__' ? p.customSpecialty : p.specialty
@@ -325,13 +288,10 @@ function fmtDate(iso) {
 }
 
 function esc(s) {
-  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
-
-const iconGear = () => `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`
-const iconKey = () => `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`
 const iconPlus = () => `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`
 const iconDownload = () => `<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v8M4 6l3 3 3-3M1 11h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`
 const iconTrash = () => `<svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M1 3h11M4 3V2h5v1M5 6v4M8 6v4M2 3l1 9h7l1-9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
@@ -340,31 +300,9 @@ const iconCheck = () => `<svg width="12" height="12" viewBox="0 0 12 12" fill="n
 // ── Listeners ─────────────────────────────────────────────────────────────────
 
 function attachListeners() {
-  const panel = document.getElementById('settings-panel')
-
-  document.getElementById('btn-settings')?.addEventListener('click', () => {
-    const open = panel.style.display === 'block'
-    panel.style.display = open ? 'none' : 'block'
-    panel.innerHTML = buildSettings()
-    attachSettingsListeners()
-  })
-
-  document.getElementById('btn-open-settings')?.addEventListener('click', () => {
-    panel.style.display = 'block'
-    panel.innerHTML = buildSettings()
-    attachSettingsListeners()
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  })
-
-  document.getElementById('btn-close-settings')?.addEventListener('click', () => {
-    panel.style.display = 'none'
-  })
-
   document.getElementById('arrival-date')?.addEventListener('change', e => {
-    state.arrivalDate = e.target.value
-    render()
+    state.arrivalDate = e.target.value; render()
   })
-
   document.getElementById('btn-add')?.addEventListener('click', addPerson)
   document.getElementById('btn-download')?.addEventListener('click', handleDownload)
 
@@ -394,7 +332,6 @@ function attachListeners() {
     else if (btn.dataset.action === 'reupload') document.getElementById(`file-${id}`)?.click()
   })
 
-  // Drag-and-drop
   document.querySelectorAll('.passport-upload').forEach(zone => {
     zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over') })
     zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'))
@@ -407,25 +344,5 @@ function attachListeners() {
   })
 }
 
-function attachSettingsListeners() {
-  document.getElementById('btn-save-key')?.addEventListener('click', () => {
-    const key = document.getElementById('api-key-input')?.value.trim() || ''
-    state.apiKey = key
-    localStorage.setItem('apiKey', key)
-    document.getElementById('settings-panel').style.display = 'none'
-    render()
-    showToast(key ? 'API ключ сохранён ✓' : 'Ключ удалён', key ? 'success' : '')
-  })
-
-  document.getElementById('btn-close-settings')?.addEventListener('click', () => {
-    document.getElementById('settings-panel').style.display = 'none'
-  })
-
-  document.getElementById('api-key-input')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('btn-save-key')?.click()
-  })
-}
-
 // ── Boot ──────────────────────────────────────────────────────────────────────
-
 render()
