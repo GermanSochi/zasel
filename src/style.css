@@ -248,6 +248,7 @@ body {
   padding: 9px 16px; border-radius: var(--radius-sm);
   cursor: pointer; border: none; outline: none;
   transition: transform 150ms var(--ease-out), filter 150ms, background 150ms;
+  -webkit-user-select: none;
   user-select: none;
 }
 .btn:active { transform: scale(0.97); }
@@ -385,6 +386,62 @@ body {
 @starting-style {
   .toast { opacity: 0; transform: translateY(12px); }
 }
+
+/* ── OCR progress ── */
+.ocr-progress-wrap {
+  margin-bottom: 14px;
+  padding: 14px;
+  background: #f0f4ff;
+  border-radius: var(--radius-sm);
+  border: 1px solid #c7d7ff;
+}
+.ocr-progress-label {
+  font-size: 13px;
+  color: #2563eb;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ocr-progress-bar {
+  height: 4px;
+  background: #dbeafe;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ocr-progress-fill {
+  height: 100%;
+  background: #2563eb;
+  border-radius: 2px;
+  transition: width 300ms ease-out;
+}
+
+/* ── Status labels ── */
+.status-ok { color: var(--success); display: inline-flex; align-items: center; gap: 4px; }
+.status-err { color: var(--danger); }
+
+/* ── Empty state ── */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px 36px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+.empty-icon { font-size: 36px; margin-bottom: 12px; }
+.empty-text { font-size: 15px; font-weight: 500; color: var(--text); margin-bottom: 4px; }
+.empty-sub { font-size: 13px; color: var(--text-muted); }
+
+/* ── Danger ghost button ── */
+.btn-danger-ghost {
+  background: none; color: var(--danger); padding: 5px 10px;
+  border: none; border-radius: var(--radius-sm); cursor: pointer;
+  font-size: 12px; font-family: inherit; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 5px;
+  transition: background 150ms, transform 150ms var(--ease-out);
+}
+.btn-danger-ghost:active { transform: scale(0.96); }
+.btn-danger-ghost:hover { background: var(--danger-bg); }
 
 /* ── Responsive ── */
 @media (max-width: 480px) {
