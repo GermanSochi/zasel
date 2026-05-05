@@ -1,12 +1,12 @@
 /**
  * Offline OCR паспортов без API ключа.
  *
- * Стратегия (в порядке надёжности):
- *  1. MRZ-зона — OCR-B шрифт, нет голограмм, Tesseract читает ~99%.
- *     ФИКС: пробелы заменяются на '<' (OCR читает fill-символ как пробел).
- *  2. Визуальные лейблы (ФАМИЛИЯ / ИМЯ / ОТЧЕСТВО) + обратный поиск.
- *  3. Standalone: крупная заглавная кириллическая строка (новый паспорт РФ).
- *  4. Дата рождения: предпочитаем год 1940–2010 (не дату выдачи паспорта).
+ * Стратегия:
+ *  1. MRZ — пробелы → '<' (OCR читает fill-символ как пробел)
+ *  2. Визуальные лейблы + поиск в радиусе 2 строк (до и после)
+ *  3. Standalone: заглавная строка перед "ФАМИЛИЯ" / "ИМЯ" / "PNRUS"
+ *  4. Дата: год > 1940 && год < (currentYear - 14) — не берём дату выдачи
+ *  5. Canvas: grayscale → threshold Отсу (выжигает серый фон паспорта)
  */
 
 import { createWorker } from 'tesseract.js'
@@ -24,7 +24,7 @@ async function getWorker(onProgress) {
   return _worker
 }
 
-// ── 1. Предобработка ──────────────────────────────────────────────────────────
+// ── 1. Предобработка изображения ─────────────────────────────────────────────
 
 export function preprocessImage(file) {
   return new Promise((resolve, reject) => {
@@ -46,22 +46,50 @@ export function preprocessImage(file) {
 
       const id = ctx.getImageData(0, 0, w, h)
       const d = id.data
-      // Grayscale
+
+      // Шаг 1: Grayscale
       for (let i = 0; i < d.length; i += 4) {
         const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
         d[i] = d[i + 1] = d[i + 2] = g
       }
-      // Contrast +40
-      const f = (259 * 295) / (255 * 219)
-      for (let i = 0; i < d.length; i += 4) {
-        const v = Math.max(0, Math.min(255, f * (d[i] - 128) + 128))
-        d[i] = d[i + 1] = d[i + 2] = v
-      }
+
+      // Шаг 2: Threshold по методу Отсу — выжигает серый фон паспорта
+      applyThreshold(d, w, h)
+
       ctx.putImageData(id, 0, 0)
       resolve(canvas.toDataURL('image/png'))
     }
     img.src = url
   })
+}
+
+// Метод Отсу: автоматически находит порог между фоном и текстом
+function applyThreshold(d, w, h) {
+  const hist = new Array(256).fill(0)
+  for (let i = 0; i < d.length; i += 4) hist[d[i]]++
+
+  const total = w * h
+  let sum = 0
+  for (let t = 0; t < 256; t++) sum += t * hist[t]
+
+  let sumB = 0, wB = 0, varMax = 0, threshold = 128
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]
+    if (wB === 0) continue
+    const wF = total - wB
+    if (wF === 0) break
+    sumB += t * hist[t]
+    const mB = sumB / wB
+    const mF = (sum - sumB) / wF
+    const v = wB * wF * (mB - mF) ** 2
+    if (v > varMax) { varMax = v; threshold = t }
+  }
+
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i] > threshold ? 255 : 0
+    d[i] = d[i + 1] = d[i + 2] = v
+  }
 }
 
 // ── 2. Главная функция ────────────────────────────────────────────────────────
@@ -83,11 +111,9 @@ export async function extractPassportData(imageDataUrl, _apiKey, onProgress) {
 
 function parsePassportText(raw) {
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean)
-
   const mrz = parseMRZ(lines)
   const vis = parseVisual(lines)
 
-  // Визуальный Кириллица приоритетнее MRZ-транслитерации для имён
   return {
     surname:    vis.surname    || mrz.surname    || '',
     name:       vis.name       || mrz.name       || '',
@@ -103,18 +129,14 @@ function parseMRZ(lines) {
   let mrz1 = '', mrz2 = ''
 
   for (const line of lines) {
-    // КЛЮЧЕВОЙ ФИКС: пробелы → '<', а не удаление.
-    // OCR читает fill-символ '<' как пробел. Если удалить — теряются разделители <<
     const s = line
-      .replace(/\s/g, '<')
+      .replace(/\s/g, '<')          // OCR читает '<' как пробел — восстанавливаем
       .replace(/[^A-Za-z0-9<]/g, '<')
       .toUpperCase()
 
-    // Строка 1: P<RUS... или PNRUS...
     if (/^P[A-Z<][A-Z]{3}[A-Z<]{5,}/.test(s) && (s.match(/</g) || []).length >= 5) {
       mrz1 = s
     }
-    // Строка 2: 9 цифробукв + 1 + 3 буквы страны + 6 цифр ДР
     if (/^[A-Z0-9]{9}[0-9][A-Z]{3}[0-9]{6}/.test(s)) {
       mrz2 = s
     }
@@ -143,13 +165,11 @@ function parseMRZ(lines) {
   return result
 }
 
-// Транслитерация MRZ Latin → Кириллица (ИКАО/МВД России)
 const MRZ_MAP = [
-  ['SHCH', 'Щ'], ['ZHH', 'Ж'], ['KHH', 'Х'],
-  ['ZH',  'Ж'],  ['KH',  'Х'],  ['TS',  'Ц'],  ['TC',  'Ц'],
-  ['CH',  'Ч'],  ['SH',  'Ш'],  ['IE',  'Ъ'],  ['IU',  'Ю'],
-  ['IA',  'Я'],  ['JO',  'Ё'],  ['YO',  'Ё'],  ['YU',  'Ю'],
-  ['YA',  'Я'],
+  ['SHCH','Щ'],['ZHH','Ж'],['KHH','Х'],
+  ['ZH','Ж'],['KH','Х'],['TS','Ц'],['TC','Ц'],
+  ['CH','Ч'],['SH','Ш'],['IE','Ъ'],['IU','Ю'],
+  ['IA','Я'],['JO','Ё'],['YO','Ё'],['YU','Ю'],['YA','Я'],
   ['A','А'],['B','Б'],['V','В'],['G','Г'],['D','Д'],['E','Е'],
   ['Z','З'],['I','И'],['J','Й'],['K','К'],['L','Л'],['M','М'],
   ['N','Н'],['O','О'],['P','П'],['R','Р'],['S','С'],['T','Т'],
@@ -176,65 +196,73 @@ function parseVisual(lines) {
 
   for (let i = 0; i < lines.length; i++) {
     const u = lines[i].toUpperCase()
-    const next  = lines[i + 1] || ''
-    const next2 = lines[i + 2] || ''
 
-    // ── ФАМИЛИЯ ──
-    if (u.includes('ФАМИЛИ')) {
-      const inline = cyrAfterLabel(lines[i], 'ФАМИЛИ')
-      // Новые паспорта РФ печатают фамилию КРУПНО над лейблом → смотрим назад
-      let prevSurname = ''
-      for (let j = Math.max(0, i - 5); j < i && !prevSurname; j++) {
-        const t = lines[j].trim().toUpperCase()
-        if (/^[А-ЯЁ\-]{5,}$/.test(t) && !isLabel(lines[j])) prevSurname = t
-      }
-      result.surname = toTitle(inline || firstCyr(next) || prevSurname)
+    // ── ФАМИЛИЯ: ищем в радиусе 2 строк ──────────────────────────────────────
+    // Ключевые маркеры: "ФАМИЛИ", "SURNAME", начало MRZ "PNRUS"
+    const isSurnameAnchor = u.includes('ФАМИЛИ') || u.includes('SURNAME') || /^PNRU[S<]/.test(u)
+    if (isSurnameAnchor) {
+      const inline = u.includes('ФАМИЛИ') ? cyrAfterLabel(lines[i], 'ФАМИЛИ')
+                   : u.includes('SURNAME') ? cyrAfterLabel(lines[i], 'SURNAME') : ''
+
+      // Строка непосредственно ДО якоря — главный кандидат на фамилию
+      const prevCandidate = surnameFromRadius(lines, i, 2)
+      result.surname = toTitle(inline || prevCandidate)
     }
 
-    // ── ИМЯ (не путать с ФАМИЛИЯ) ──
+    // ── ИМЯ: поиск в радиусе 2 строк от лейбла ───────────────────────────────
     if (/\bИМЯ\b/.test(u) && !u.includes('ФАМИЛИ')) {
       const inline = cyrAfterLabel(lines[i], 'ИМЯ')
-      // В новых паспортах значения могут быть на строке ДО лейбла
-      const prevLine = i > 0 ? lines[i - 1] : ''
-      const src = inline || next || (cyrWords(prevLine).length >= 2 ? prevLine : '')
-      const words = cyrWords(src)
+      // Берём строки [-2..+2] относительно "Имя", собираем кириллические слова
+      const nearby = getNearbyText(lines, i, 2)
+      const words  = cyrWords(inline || nearby)
       if (words.length >= 2) {
         result.name       = toTitle(words[0])
         result.patronymic = toTitle(words[1])
       } else if (words.length === 1) {
         result.name = toTitle(words[0])
-        if (!result.patronymic) {
-          const p = firstCyr(next2)
-          if (p.length >= 3 && !isLabel(next2)) result.patronymic = toTitle(p)
-        }
       }
     }
 
-    // ── ОТЧЕСТВО ──
+    // ── ОТЧЕСТВО ──────────────────────────────────────────────────────────────
     if (u.includes('ОТЧЕСТВ') && !result.patronymic) {
       const inline = cyrAfterLabel(lines[i], 'ОТЧЕСТВ')
-      const prevLine = i > 0 ? lines[i - 1] : ''
-      result.patronymic = toTitle(inline || firstCyr(next) || firstCyr(prevLine))
+      const nearby = getNearbyText(lines, i, 2)
+      result.patronymic = toTitle(inline || firstCyr(nearby))
     }
 
-    // ── ДАТА РОЖДЕНИЯ (фильтруем дату выдачи паспорта) ──
+    // ── ДАТА РОЖДЕНИЯ ─────────────────────────────────────────────────────────
     if (/ДАТА.{0,6}РОЖ|РОЖ.{0,6}ДАТА/.test(u)) {
-      const d = findDOBDate(lines[i]) || findDOBDate(next)
+      const d = findDOBDate(lines[i]) || findDOBDate(lines[i + 1] || '')
       if (d) result.dob = d
     }
     if (u.includes('РОЖДЕН') && !result.dob) {
-      const d = findDOBDate(lines[i]) || findDOBDate(next)
+      const d = findDOBDate(lines[i]) || findDOBDate(lines[i + 1] || '')
       if (d) result.dob = d
     }
   }
 
-  // Fallback: лучшая дата с годом в диапазоне ДР (1940–2010)
-  if (!result.dob) result.dob = findBestDOB(lines)
-
-  // Fallback: standalone заглавная кириллическая строка (новый формат паспорта)
+  if (!result.dob)     result.dob     = findBestDOB(lines)
   if (!result.surname) result.surname = findStandaloneSurname(lines)
 
   return result
+}
+
+// Ищем фамилию в строках ПЕРЕД якорем (радиус r): берём ближайшую Кириллическую строку
+function surnameFromRadius(lines, anchorIdx, r) {
+  for (let j = anchorIdx - 1; j >= Math.max(0, anchorIdx - r); j--) {
+    const t = lines[j].trim().toUpperCase()
+    if (/^[А-ЯЁ\-]{4,}$/.test(t) && !isLabel(lines[j])) return t
+  }
+  return ''
+}
+
+// Объединяем текст строк вокруг индекса (исключая сам лейбл)
+function getNearbyText(lines, idx, r) {
+  const parts = []
+  for (let j = Math.max(0, idx - r); j <= Math.min(lines.length - 1, idx + r); j++) {
+    if (j !== idx) parts.push(lines[j])
+  }
+  return parts.join(' ')
 }
 
 // ── Хелперы ───────────────────────────────────────────────────────────────────
@@ -254,7 +282,12 @@ function cyrWords(s) {
   return (s.match(/[А-ЯЁа-яё\-]{2,}/g) || []).map(w => w.toUpperCase())
 }
 
-// Дата рождения: год 1940–2010 (чтобы не захватить дату выдачи ~2000–2025)
+// Динамический диапазон ДР: год > 1940 && год < (currentYear - 14)
+function isDOBYear(year) {
+  const minAge = 14
+  return year > 1940 && year < (new Date().getFullYear() - minAge)
+}
+
 function findDOBDate(s) {
   if (!s) return null
   const c = s.replace(/[ОоOо]/g, '0')
@@ -262,8 +295,7 @@ function findDOBDate(s) {
   let m
   while ((m = re.exec(c)) !== null) {
     const dateStr = m[0].replace(/[\s–\-]/g, '.')
-    const year = parseInt(dateStr.slice(-4))
-    if (year >= 1940 && year <= 2010) return dateStr
+    if (isDOBYear(parseInt(dateStr.slice(-4)))) return dateStr
   }
   return null
 }
@@ -275,20 +307,13 @@ function findDate(s) {
   return m ? m[0].replace(/[\s–\-]/g, '.') : null
 }
 
-// Выбираем дату с наиболее правдоподобным годом рождения
 function findBestDOB(lines) {
   const all = []
-  for (const l of lines) {
-    const d = findDate(l)
-    if (d) all.push(d)
-  }
-  return all.find(d => {
-    const y = parseInt(d.slice(-4))
-    return y >= 1940 && y <= 2010
-  }) || all[0] || ''
+  for (const l of lines) { const d = findDate(l); if (d) all.push(d) }
+  return all.find(d => isDOBYear(parseInt(d.slice(-4)))) || all[0] || ''
 }
 
-// В новых паспортах РФ фамилия напечатана ЗАГЛАВНЫМИ буквами отдельной строкой
+// Standalone заглавная Кириллическая строка (новый формат паспорта РФ)
 function findStandaloneSurname(lines) {
   for (const line of lines) {
     const t = line.trim()
