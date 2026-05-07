@@ -10,6 +10,7 @@
   "dependencies": {
     "docx": "^8.5.0",
     "file-saver": "^2.0.5",
+    "onnxruntime-web": "^1.25.1",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
