@@ -2,3 +2,5 @@ node_modules/
 dist/
 docx_tmp/
 .env
+
+.vercel
